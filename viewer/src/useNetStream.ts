@@ -33,12 +33,13 @@ function toItem(e: StreamEvent): StreamItem | null {
   const target = e.attributes['bn.target.id'];
   const to = typeof target === 'string' && target ? target : from;
   const ms = Number(BigInt(e.start_time_unix_nano) / 1_000_000n);
+  const rawKind = e.name.replace(/^agent\./, '');
   return {
     id: e.event_id,
     at: new Date(ms).toISOString(),
     from,
     to,
-    kind: e.name.replace(/^agent\./, ''),
+    kind: rawKind === 'trade_action' ? 'action' : rawKind,
     gist: String(e.attributes['bn.label'] ?? e.name),
     status: e.status?.code === 'ERROR' ? 'error' : 'ok',
   };

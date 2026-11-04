@@ -16,6 +16,7 @@ import { createMcpServer } from './mcp.js';
 import { dataDir, defaultDbPath, portFromEnv, retentionMs } from './paths.js';
 import { rawFromReport, type ReportArgs } from './report.js';
 import { openStore, type Store } from './store.js';
+import { ensureToken, tokenPath } from './token.js';
 import { VERSION } from './version.js';
 
 interface Opts {
@@ -33,9 +34,11 @@ function need(args: string[], flag: string): string {
   return v;
 }
 
-function parse(argv: string[]): Opts {
+/** Global flags are accepted before or after the command. `--port` used to be ignored after it. */
+export function parseArgs(argv: string[]): Opts {
   const opts: Opts = { help: false, version: false, rest: [] };
   const args = [...argv];
+  let commandSet = false;
   while (args.length) {
     const a = args[0];
     if (a === '--help' || a === '-h') {
@@ -63,15 +66,27 @@ function parse(argv: string[]): Opts {
       process.env.SWARMSCOPE_HOME = need(args, '--home');
       continue;
     }
-    if (a.startsWith('-')) throw new Error(`Unknown flag ${a}. Try swarmscope --help.`);
-    opts.command = args.shift();
-    opts.rest = args;
-    break;
+    if (a === '--') {
+      args.shift();
+      if (!commandSet && args.length) {
+        opts.command = args.shift();
+        commandSet = true;
+      }
+      opts.rest.push(...args);
+      break;
+    }
+    if (!commandSet) {
+      if (a.startsWith('-')) throw new Error(`Unknown flag ${a}. Try swarmscope --help.`);
+      opts.command = args.shift();
+      commandSet = true;
+      continue;
+    }
+    opts.rest.push(args.shift()!);
   }
   return opts;
 }
 
-function help(): string {
+export function helpText(): string {
   return `Swarmscope ${VERSION} — local map of your AI agents
 
 Usage
@@ -83,8 +98,9 @@ Usage
 Emit
   --from <slug>              sending agent (required)
   --to <slug>                receiving agent (required for message, handoff, review)
-  --kind <kind>              message | handoff | review | file_write | alert | heartbeat | trade_action
+  --kind <kind>              message | handoff | review | file_write | action | alert | heartbeat
   --label <text>             short neutral gist, 60 characters or fewer
+  --tags <slugs>             comma-separated short slugs
   --status ok|error          default ok
   --tool <name>              tool the agent used
   --file <path>              relative path
@@ -101,6 +117,9 @@ Options
 The demo command uses ~/.swarmscope/demo.db and does not touch your real log.
 Set SWARMSCOPE_RETENTION_DAYS to change how long events are kept (default 7).
 Set SWARMSCOPE_NO_UI=1 to run the MCP server without the viewer.
+HTTP writes need the bearer token in ~/.swarmscope/token (mode 0600).
+The value is never printed. swarmscope emit reads that file when a viewer is
+already running. Stdio MCP does not use the token.
 Nothing leaves this machine.
 `;
 }
@@ -114,7 +133,13 @@ function flagValue(rest: string[], name: string): string | undefined {
   return v;
 }
 
-function emit(store: Store, rest: string[]): void {
+function listFlag(rest: string[], name: string): string[] | undefined {
+  const v = flagValue(rest, name);
+  if (v === undefined) return undefined;
+  return v.split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+function reportFromFlags(rest: string[]): ReportArgs {
   const args = [...rest];
   const from = flagValue(args, '--from');
   const to = flagValue(args, '--to');
@@ -126,7 +151,11 @@ function emit(store: Store, rest: string[]): void {
   const parent = flagValue(args, '--parent');
   const id = flagValue(args, '--id');
   const name = flagValue(args, '--name');
-  const test = args.includes('--test');
+  const tags = listFlag(args, '--tags');
+  const tickers = listFlag(args, '--tickers');
+  const testAt = args.indexOf('--test');
+  const test = testAt >= 0;
+  if (test) args.splice(testAt, 1);
   for (const extra of args) {
     if (extra.startsWith('--')) throw new Error(`Unknown flag ${extra}.`);
     throw new Error(`Unexpected argument "${extra}".`);
@@ -139,7 +168,61 @@ function emit(store: Store, rest: string[]): void {
   if (parent) report.parent_id = parent;
   if (id) report.event_id = id;
   if (name) report.name = name;
+  if (tags) report.tags = tags;
+  if (tickers) report.tickers = tickers;
   if (test) report.test = true;
+  return report;
+}
+
+function connectionRefused(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  const stack = [err];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH') return true;
+    const cause = (current as { cause?: unknown }).cause;
+    if (cause) stack.push(cause);
+    const errors = (current as { errors?: unknown }).errors;
+    if (Array.isArray(errors)) stack.push(...errors);
+  }
+  return false;
+}
+
+/** Post to a running viewer. Returns 'down' only when nothing is listening. */
+async function postEmit(port: number, token: string, body: ReportArgs): Promise<'down' | Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/api/v1/emit`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    if (connectionRefused(e)) return 'down';
+    throw e;
+  }
+  const json = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+  if (!res.ok) {
+    throw new Error(json?.error?.message ?? `The local viewer returned HTTP ${res.status}.`);
+  }
+  return (json ?? {}) as Record<string, unknown>;
+}
+
+async function emit(store: Store, rest: string[], port: number, token: string, directOnly: boolean): Promise<void> {
+  const report = reportFromFlags(rest);
+  if (!directOnly) {
+    const posted = await postEmit(port, token, report);
+    if (posted !== 'down') {
+      process.stdout.write(JSON.stringify(posted) + '\n');
+      return;
+    }
+  }
   const now = Date.now();
   const ev = checkNetEvent(rawFromReport(report, now, () => newEventId('cli')), now);
   const result = store.ingestValid([ev], now);
@@ -153,10 +236,11 @@ function emit(store: Store, rest: string[]): void {
   );
 }
 
-async function serve(store: Store, port: number): Promise<void> {
-  const running = await startHttp({ store, port });
+async function serve(store: Store, port: number, token: string): Promise<void> {
+  const running = await startHttp({ store, port, token });
   console.log(`Swarmscope viewer  ${running.url}`);
   console.log(`Data               ${dataDir()}`);
+  console.log(`Write token        ${tokenPath()}`);
   const stop = async () => {
     await running.close();
     store.close();
@@ -166,11 +250,12 @@ async function serve(store: Store, port: number): Promise<void> {
   process.on('SIGTERM', () => void stop());
 }
 
-async function mcp(store: Store, port: number): Promise<void> {
+async function mcp(store: Store, port: number, token: string): Promise<void> {
   if (process.env.SWARMSCOPE_NO_UI !== '1') {
     try {
-      const running = await startHttp({ store, port });
+      const running = await startHttp({ store, port, token });
       console.error(`Swarmscope viewer  ${running.url}`);
+      console.error(`Write token        ${tokenPath()}`);
       const stopUi = () => void running.close();
       process.on('SIGINT', stopUi);
       process.on('SIGTERM', stopUi);
@@ -185,7 +270,7 @@ async function mcp(store: Store, port: number): Promise<void> {
   await server.connect(transport);
 }
 
-async function demo(port: number, explicitDb?: string): Promise<void> {
+async function demo(port: number, token: string, explicitDb?: string): Promise<void> {
   const path = explicitDb || defaultDbPath(true);
   for (const suffix of ['', '-wal', '-shm']) {
     rmSync(path + suffix, { force: true });
@@ -194,44 +279,45 @@ async function demo(port: number, explicitDb?: string): Promise<void> {
   const seeded = seedDemo(store);
   console.log(`Sample network     ${seeded.agents} agents, ${seeded.events} events`);
   console.log(`Demo database      ${path}`);
-  await serve(store, port);
+  await serve(store, port, token);
 }
 
 export async function main(argv: string[]): Promise<void> {
-  const opts = parse(argv);
+  const opts = parseArgs(argv);
   if (opts.version) {
     console.log(VERSION);
     return;
   }
   if (opts.help || opts.command === 'help') {
-    console.log(help());
+    console.log(helpText());
     return;
   }
   if (opts.port !== undefined && (!Number.isInteger(opts.port) || opts.port < 0 || opts.port > 65535)) {
     throw new Error('--port must be an integer from 0 to 65535.');
   }
   const port = opts.port ?? portFromEnv();
+  const token = ensureToken();
   const command = opts.command ?? 'mcp';
   if (command === 'demo') {
-    await demo(port, opts.db);
+    await demo(port, token, opts.db);
     return;
   }
   const db = opts.db || defaultDbPath(false);
   const store = openStore(db, { retentionMs: retentionMs() });
   if (command === 'emit') {
     try {
-      emit(store, opts.rest);
+      await emit(store, opts.rest, port, token, opts.db !== undefined);
     } finally {
       store.close();
     }
     return;
   }
   if (command === 'ui') {
-    await serve(store, port);
+    await serve(store, port, token);
     return;
   }
   if (command === 'mcp') {
-    await mcp(store, port);
+    await mcp(store, port, token);
     return;
   }
   store.close();

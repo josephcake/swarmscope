@@ -17,6 +17,7 @@ const PASS = [
   'bn.target.id',
   'bn.label',
   'bn.source',
+  'bn.tags',
   'bn.tickers',
   'bn.file',
   'bn.test',
@@ -127,6 +128,7 @@ export function otlpToEvents(body: unknown): OtlpParse {
       if (a['bn.event.name'] !== undefined) {
         const n = String(a['bn.event.name']);
         name = n.startsWith('agent.') ? n : `agent.${n}`;
+        if (name === 'agent.trade_action') name = 'agent.action';
         if (!(NET_EVENT_NAMES as readonly string[]).includes(name)) {
           throw new OtlpError(`bn.event.name "${n.slice(0, 30)}" is not a v1 event name.`);
         }

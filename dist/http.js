@@ -10,6 +10,7 @@ import { join, normalize, sep } from 'node:path';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { WebSocketServer } from 'ws';
 import { NET_LIMITS, NetEventError, batchOf, checkNetEvent, newEventId } from './events.js';
+import { bearerOk, isJsonContentType, loopbackHost, loopbackOrigin, mcpWritesEvent } from './guard.js';
 import { OtlpError, otlpToEvents } from './otlp.js';
 import { createMcpServer } from './mcp.js';
 import { publicDir } from './paths.js';
@@ -109,9 +110,15 @@ function serveFile(res, file) {
     createReadStream(file).pipe(res);
 }
 export async function startHttp(opts) {
-    const { store } = opts;
+    const { store, token } = opts;
     const root = publicDir();
     let cursor = store.head();
+    let boundPort = opts.port;
+    const forbidUpgrade = (socket, message) => {
+        const body = JSON.stringify({ error: { code: 'forbidden', message } });
+        socket.write(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+        socket.destroy();
+    };
     const server = createServer((req, res) => {
         void route(req, res).catch((e) => {
             if (res.headersSent)
@@ -165,19 +172,15 @@ export async function startHttp(opts) {
             socket.destroy();
             return;
         }
-        const origin = req.headers.origin;
-        if (origin) {
-            try {
-                if (new URL(origin).host !== req.headers.host) {
-                    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-                    socket.destroy();
-                    return;
-                }
-            }
-            catch {
-                socket.destroy();
-                return;
-            }
+        const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+        if (!loopbackHost(hostHeader, boundPort)) {
+            forbidUpgrade(socket, 'Host must be a loopback address on this port.');
+            return;
+        }
+        const originHeader = req.headers.origin;
+        if (Array.isArray(originHeader) || !loopbackOrigin(typeof originHeader === 'string' ? originHeader : undefined)) {
+            forbidUpgrade(socket, 'Origin must be a loopback address.');
+            return;
         }
         if (sockets.size >= 20) {
             socket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nConnection: close\r\n\r\n');
@@ -207,10 +210,37 @@ export async function startHttp(opts) {
         });
     });
     async function route(req, res) {
-        const host = req.headers.host ?? '127.0.0.1';
-        const url = new URL(req.url ?? '/', `http://${host}`);
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const path = url.pathname.replace(/\/+$/, '') || '/';
         const method = req.method ?? 'GET';
+        const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+        if (!loopbackHost(hostHeader, boundPort)) {
+            req.resume();
+            fail(res, 403, 'forbidden_host', 'Host must be a loopback address on this port.');
+            return;
+        }
+        const originHeader = req.headers.origin;
+        if (Array.isArray(originHeader) || !loopbackOrigin(typeof originHeader === 'string' ? originHeader : undefined)) {
+            req.resume();
+            fail(res, 403, 'forbidden_origin', 'Origin must be a loopback address.');
+            return;
+        }
+        const writePath = method === 'POST' &&
+            (path === '/api/v1/emit' || path === '/api/v1/network/events' || path === '/v1/traces' || path === '/mcp');
+        if (writePath) {
+            const contentType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined;
+            if (!isJsonContentType(contentType)) {
+                req.resume();
+                fail(res, 415, 'unsupported_media_type', 'Content-Type must be application/json.');
+                return;
+            }
+        }
+        const tokenWrite = method === 'POST' && (path === '/api/v1/emit' || path === '/api/v1/network/events' || path === '/v1/traces');
+        if (tokenWrite && !bearerOk(req.headers.authorization, token)) {
+            req.resume();
+            fail(res, 401, 'unauthorized', 'This write needs the local bearer token.', { 'www-authenticate': 'Bearer' });
+            return;
+        }
         if (path === '/mcp') {
             await handleMcp(req, res);
             return;
@@ -284,7 +314,11 @@ export async function startHttp(opts) {
             return;
         }
         if (method === 'HEAD') {
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
+            const ext = file.slice(file.lastIndexOf('.'));
+            res.writeHead(200, {
+                'content-type': MIME[ext] ?? 'application/octet-stream',
+                'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+            });
             res.end();
             return;
         }
@@ -406,6 +440,10 @@ export async function startHttp(opts) {
                 return;
             }
         }
+        if (mcpWritesEvent(parsed) && !bearerOk(req.headers.authorization, token)) {
+            fail(res, 401, 'unauthorized', 'This write needs the local bearer token.', { 'www-authenticate': 'Bearer' });
+            return;
+        }
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         const mcp = createMcpServer(store);
         let closed = false;
@@ -436,6 +474,9 @@ export async function startHttp(opts) {
         };
         server.once('error', onError);
         server.listen(opts.port, '127.0.0.1', () => {
+            const listening = server.address();
+            if (typeof listening === 'object' && listening)
+                boundPort = listening.port;
             server.off('error', onError);
             resolve();
         });

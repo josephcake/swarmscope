@@ -4,7 +4,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { KIND_NAMES, NET_SOURCES, NetEventError, checkNetEvent, kindOf, newEventId, type NetStreamEvent } from './events.js';
+import { KIND_NAMES, NET_LIMITS, NET_SOURCES, NetEventError, checkNetEvent, kindOf, newEventId, type NetStreamEvent } from './events.js';
 import { rawFromReport } from './report.js';
 import { allowWrite } from './rate.js';
 import type { NetworkSnapshot, Store } from './store.js';
@@ -13,6 +13,37 @@ import { VERSION } from './version.js';
 export const LIST_DEFAULT = 50;
 export const LIST_MAX = 200;
 export const EDGES_MAX = 200;
+
+const KIND_ENUM = KIND_NAMES as [string, ...string[]];
+
+const LEGACY_TICKER = /^[A-Z]{1,6}(\.[A-Z])?$/;
+
+/** Accept deprecated names without listing them on the tool schema. */
+function liftLegacy(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const obj = { ...(value as Record<string, unknown>) };
+  if (obj.kind === 'trade_action') obj.kind = 'action';
+  if (obj.tickers !== undefined) {
+    if (!Array.isArray(obj.tickers)) {
+      obj.tags = obj.tickers;
+    } else {
+      const current = Array.isArray(obj.tags) ? obj.tags : [];
+      obj.tags = [
+        ...current,
+        ...obj.tickers.map((item) =>
+          typeof item === 'string' && LEGACY_TICKER.test(item) ? item.toLowerCase().replaceAll('.', '-') : item,
+        ),
+      ];
+    }
+    delete obj.tickers;
+  }
+  return obj;
+}
+
+const kindFilterSchema = z.preprocess(
+  (value) => (value === 'trade_action' ? 'action' : value),
+  z.enum(KIND_ENUM).optional(),
+);
 
 const instructions = [
   'Swarmscope is a local map of your AI agents and the messages, handoffs, reviews, and tool calls between them.',
@@ -29,27 +60,30 @@ export function createMcpServer(store: Store): McpServer {
     {
       title: 'Report an agent event',
       description:
-        'Record one event from an agent: a message, handoff, review, file write, alert, heartbeat, or a tool call (set tool). ' +
+        'Record one event from an agent: a message, handoff, review, file write, action, alert, heartbeat, or a tool call (set tool). ' +
         'from and to are lowercase slugs you choose (for example planner, researcher, coder). ' +
         'to is required for message, handoff, and review. label is a short neutral gist, 60 characters or fewer. ' +
         'Set test=true for traffic you do not want in network totals. The same event_id is stored once.',
-      inputSchema: {
-        from: z.string().describe('Sending agent id, a lowercase slug.'),
-        to: z.string().optional().describe('Receiving agent id. Required for message, handoff, and review.'),
-        kind: z.enum(KIND_NAMES as [string, ...string[]]).describe('Event kind.'),
-        label: z.string().describe('Short neutral gist. No URLs, emails, or secrets.'),
-        status: z.enum(['ok', 'error']).optional(),
-        source: z.enum(NET_SOURCES).optional(),
-        tool: z.string().optional().describe('Tool the agent used. Stored as gen_ai.tool.name.'),
-        operation: z.string().optional().describe('Overrides gen_ai.operation.name.'),
-        conversation: z.string().optional().describe('Thread id. Stored as gen_ai.conversation.id.'),
-        name: z.string().optional().describe('Display name for the sending agent.'),
-        tickers: z.array(z.string()).max(12).optional(),
-        file: z.string().optional().describe('Relative path this event wrote or read.'),
-        parent_id: z.string().optional().describe('event_id of the event that caused this one.'),
-        event_id: z.string().optional().describe('Stable id. Generated when omitted.'),
-        test: z.boolean().optional().describe('Verification traffic. Hidden from network totals.'),
-      },
+      inputSchema: z.preprocess(
+        liftLegacy,
+        z.object({
+          from: z.string().describe('Sending agent id, a lowercase slug.'),
+          to: z.string().optional().describe('Receiving agent id. Required for message, handoff, and review.'),
+          kind: z.enum(KIND_ENUM).describe('Event kind: message, handoff, review, file_write, action, alert, or heartbeat.'),
+          label: z.string().describe('Short neutral gist. No URLs, emails, or secrets.'),
+          status: z.enum(['ok', 'error']).optional(),
+          source: z.enum(NET_SOURCES).optional(),
+          tool: z.string().optional().describe('Tool the agent used. Stored as gen_ai.tool.name.'),
+          operation: z.string().optional().describe('Overrides gen_ai.operation.name.'),
+          conversation: z.string().optional().describe('Thread id. Stored as gen_ai.conversation.id.'),
+          name: z.string().optional().describe('Display name for the sending agent.'),
+          tags: z.array(z.string()).max(NET_LIMITS.tags).optional().describe('Short slugs, up to 12.'),
+          file: z.string().optional().describe('Relative path this event wrote or read.'),
+          parent_id: z.string().optional().describe('event_id of the event that caused this one.'),
+          event_id: z.string().optional().describe('Stable id. Generated when omitted.'),
+          test: z.boolean().optional().describe('Verification traffic. Hidden from network totals.'),
+        }),
+      ),
       annotations: { title: 'Report event', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (args) => {
@@ -97,7 +131,7 @@ export function createMcpServer(store: Store): McpServer {
         since: z.number().int().min(0).optional(),
         limit: z.number().int().min(1).max(LIST_MAX).optional(),
         include_test: z.boolean().optional(),
-        kind: z.enum(KIND_NAMES as [string, ...string[]]).optional(),
+        kind: kindFilterSchema,
         from: z.string().optional(),
         to: z.string().optional(),
       },
@@ -143,7 +177,7 @@ export function compactEvent(e: NetStreamEvent): Record<string, unknown> {
   };
   if (a['gen_ai.tool.name']) out.tool = a['gen_ai.tool.name'];
   if (a['gen_ai.operation.name']) out.operation = a['gen_ai.operation.name'];
-  if (a['bn.tickers']?.length) out.tickers = a['bn.tickers'];
+  if (a['bn.tags']?.length) out.tags = a['bn.tags'];
   if (a['bn.file']) out.file = a['bn.file'];
   if (e.parent_id) out.parent_id = e.parent_id;
   if (a['bn.test']) out.test = true;

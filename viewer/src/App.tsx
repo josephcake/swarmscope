@@ -565,7 +565,7 @@ export default function App() {
             </span>
           ))}
           <span className="sep" />
-          {['message', 'handoff', 'review', 'file_write', 'alert'].map((k) => (
+          {['message', 'handoff', 'review', 'file_write', 'action', 'alert'].map((k) => (
             <span key={k}>
               <em className="line" style={{ background: inkFor(k), color: inkFor(k) }} />
               {kindLabel(k)}

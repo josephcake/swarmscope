@@ -14,18 +14,18 @@ export interface GraphEvent {
   status?: 'ok' | 'error';
 }
 
-/** Kind colors: message cyan, handoff magenta, review green, alert red. */
+/** Kind colors: message cyan, handoff magenta, action yellow, review green, alert red. */
 export const KIND_INK: Record<string, string> = {
   message: '#00f0ff',
   handoff: '#ff2bd6',
-  trade_action: '#fcee0a',
+  action: '#fcee0a',
   alert: '#ff3b5c',
   review: '#39ff88',
   file_write: '#9fb0d0',
   heartbeat: '#6d80a6',
 };
 export const ERROR_INK = '#ff3b5c';
-export const inkFor = (kind: string) => KIND_INK[kind] ?? '#c77dff';
+export const inkFor = (kind: string) => KIND_INK[kind === 'trade_action' ? 'action' : kind] ?? '#c77dff';
 
 export type EdgeClass = 'handoff' | 'flow';
 export const edgeClass = (kind: string): EdgeClass => (kind === 'handoff' ? 'handoff' : 'flow');

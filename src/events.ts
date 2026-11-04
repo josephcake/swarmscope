@@ -1,20 +1,26 @@
 /**
- * Swarmscope event format v1.
+ * Swarmscope event format.
  * Shaped like an OpenTelemetry span: trace and span ids, unix-nanosecond times,
  * a status, and a flat attribute map. GenAI semantic-convention names are used
  * where they exist; Swarmscope fields live under bn.*.
+ *
+ * Wire schema_version stays "1". Vocabulary revision 1.1 uses agent.action and
+ * bn.tags. agent.trade_action and bn.tickers are still accepted and stored
+ * under the new names.
  *
  * Any agent id is accepted (a lowercase slug). Nothing here is an allowlist of
  * real deployments, and the server never calls out to check an id.
  */
 
 export const NET_SCHEMA_VERSION = '1';
+/** Documented vocabulary revision. Not a wire field. */
+export const NET_VOCABULARY = '1.1';
 
 export const NET_EVENT_NAMES = [
   'agent.message',
   'agent.handoff',
   'agent.file_write',
-  'agent.trade_action',
+  'agent.action',
   'agent.alert',
   'agent.review',
   'agent.heartbeat',
@@ -30,7 +36,7 @@ export const NET_LIMITS = {
   bodyBytes: 64 * 1024,
   batch: 100,
   label: 60,
-  tickers: 12,
+  tags: 12,
   file: 120,
   idMin: 8,
   idMax: 64,
@@ -50,7 +56,7 @@ export const DEFAULT_OPERATION: Record<NetEventName, string> = {
   'agent.handoff': 'execute_tool',
   'agent.review': 'invoke_agent',
   'agent.file_write': 'execute_tool',
-  'agent.trade_action': 'execute_tool',
+  'agent.action': 'execute_tool',
   'agent.alert': 'invoke_agent',
   'agent.heartbeat': 'invoke_agent',
 };
@@ -67,6 +73,7 @@ const ATTR_KEYS = new Set([
   'bn.target.id',
   'bn.label',
   'bn.source',
+  'bn.tags',
   'bn.tickers',
   'bn.file',
   'bn.test',
@@ -108,7 +115,7 @@ export interface NetEventV1 {
     'bn.target.id'?: string;
     'bn.label': string;
     'bn.source': NetSource;
-    'bn.tickers'?: string[];
+    'bn.tags'?: string[];
     'bn.file'?: string;
     'bn.test'?: true;
   };
@@ -123,12 +130,40 @@ export class NetEventError extends Error {}
 
 const ID_RE = /^[A-Za-z0-9._:-]+$/;
 const SLUG_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+/** Legacy bn.tickers values: an uppercase symbol, optionally with one class letter. */
+const LEGACY_TICKER_RE = /^[A-Z]{1,6}(\.[A-Z])?$/;
 const HEX = (n: number) => new RegExp(`^[0-9a-f]{${n}}$`);
 const TOKENISH = /[A-Za-z0-9_\-+/=]{24,}/;
 const URLISH = /(https?:|www\.|\/\/|@)/i;
 const LABEL_OK = /^[\p{L}\p{N}\p{P}\p{Zs}$+<=>^`|~]*$/u;
 
 export const KIND_NAMES = NET_EVENT_NAMES.map((n) => n.slice('agent.'.length));
+
+/** Map the deprecated kind name onto the vocabulary 1.1 name. */
+export function canonicalKind(kind: string): string {
+  return kind === 'trade_action' ? 'action' : kind;
+}
+
+function legacyTag(raw: string): string {
+  if (SLUG_RE.test(raw)) return raw;
+  if (LEGACY_TICKER_RE.test(raw)) return raw.toLowerCase().replaceAll('.', '-');
+  return raw;
+}
+
+function readTags(value: unknown, field: string, legacy: boolean): string[] {
+  if (!Array.isArray(value)) fail(`${field} must be an array of short slugs.`);
+  if (value.length > NET_LIMITS.tags) fail(`${field} must be ${NET_LIMITS.tags} short slugs or fewer.`);
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') fail(`${field} must be an array of short slugs.`);
+    const slug = legacy ? legacyTag(item) : item;
+    if (!SLUG_RE.test(slug)) {
+      fail(`${field} must be up to ${NET_LIMITS.tags} short slugs: a letter, then letters, digits, "_" or "-".`);
+    }
+    out.push(slug);
+  }
+  return out;
+}
 
 function fail(msg: string): never {
   throw new NetEventError(msg);
@@ -202,8 +237,9 @@ export function checkNetEvent(raw: unknown, nowMs: number): NetEventV1 {
   if (typeof id !== 'string' || id.length < NET_LIMITS.idMin || id.length > NET_LIMITS.idMax || !ID_RE.test(id)) {
     fail(`event_id must be ${NET_LIMITS.idMin}-${NET_LIMITS.idMax} characters of A-Z a-z 0-9 . _ : -`);
   }
-  if (!NET_EVENT_NAMES.includes(e.name as NetEventName)) fail(`name must be one of ${NET_EVENT_NAMES.join(', ')}.`);
-  const name = e.name as NetEventName;
+  const nameInput = e.name === 'agent.trade_action' ? 'agent.action' : e.name;
+  if (!NET_EVENT_NAMES.includes(nameInput as NetEventName)) fail(`name must be one of ${NET_EVENT_NAMES.join(', ')}.`);
+  const name = nameInput as NetEventName;
 
   const start = nanos(e.start_time_unix_nano, 'start_time_unix_nano');
   const startMs = Number(start / 1_000_000n);
@@ -286,17 +322,12 @@ export function checkNetEvent(raw: unknown, nowMs: number): NetEventV1 {
     if (!NET_SOURCES.includes(a['bn.source'] as never)) fail(`bn.source must be one of ${NET_SOURCES.join(', ')}.`);
     attrs['bn.source'] = a['bn.source'] as NetSource;
   }
-  if (a['bn.tickers'] !== undefined) {
-    const t = a['bn.tickers'];
-    if (
-      !Array.isArray(t) ||
-      t.length > NET_LIMITS.tickers ||
-      t.some((x) => typeof x !== 'string' || !/^[A-Z]{1,6}(\.[A-Z])?$/.test(x))
-    ) {
-      fail(`bn.tickers must be up to ${NET_LIMITS.tickers} uppercase symbols.`);
-    }
-    attrs['bn.tickers'] = [...new Set(t as string[])];
-  }
+  const tagValues: string[] = [];
+  if (a['bn.tags'] !== undefined) tagValues.push(...readTags(a['bn.tags'], 'bn.tags', false));
+  if (a['bn.tickers'] !== undefined) tagValues.push(...readTags(a['bn.tickers'], 'bn.tickers', true));
+  const tags = [...new Set(tagValues)];
+  if (tags.length > NET_LIMITS.tags) fail(`bn.tags must be ${NET_LIMITS.tags} short slugs or fewer.`);
+  if (tags.length) attrs['bn.tags'] = tags;
   if (a['bn.file'] !== undefined) {
     const f = a['bn.file'];
     if (typeof f !== 'string' || !f || f.length > NET_LIMITS.file || f.startsWith('/') || f.includes('..') || !/^[A-Za-z0-9._\-/]+$/.test(f)) {
@@ -351,7 +382,31 @@ export function batchOf(body: unknown): unknown[] {
 }
 
 export function kindOf(name: string): string {
-  return name.startsWith('agent.') ? name.slice('agent.'.length) : name;
+  return canonicalKind(name.startsWith('agent.') ? name.slice('agent.'.length) : name);
+}
+
+/**
+ * Rewrite a stored event onto vocabulary 1.1.
+ * Old rows may still say agent.trade_action or bn.tickers.
+ */
+export function canonicalizeEvent<T extends { name: string; attributes: Record<string, unknown> }>(event: T): T {
+  const name = event.name === 'agent.trade_action' ? 'agent.action' : event.name;
+  const legacy = event.attributes['bn.tickers'];
+  if (name === event.name && legacy === undefined) return event;
+  const attributes: Record<string, unknown> = { ...event.attributes };
+  const tags: string[] = [];
+  const push = (list: unknown, fromLegacy: boolean) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (typeof item !== 'string') continue;
+      tags.push(fromLegacy ? legacyTag(item) : item);
+    }
+  };
+  push(attributes['bn.tags'], false);
+  push(legacy, true);
+  delete attributes['bn.tickers'];
+  if (tags.length) attributes['bn.tags'] = [...new Set(tags)];
+  return { ...event, name, attributes };
 }
 
 /** Short id for events the server mints (mcp-…, cli-…). */

@@ -1,8 +1,11 @@
-# Swarmscope event format, v1
+# Swarmscope event format, vocabulary 1.1
 
 One event is one JSON object, shaped like an OpenTelemetry span. Attribute names follow the
 OpenTelemetry GenAI semantic conventions where a name exists. Swarmscope's own fields use the
 `bn.*` prefix.
+
+The wire field `schema_version` is still `"1"`. Vocabulary revision 1.1 is this note: the
+generic kind is `agent.action` and the tag list is `bn.tags`. See [Migration](#migration).
 
 The server is local. It listens on `127.0.0.1` only, keeps the log in your home directory, and
 does not check agent ids against any remote list. An agent id is any lowercase slug you choose.
@@ -31,7 +34,7 @@ does not check agent ids against any remote list. An agent id is any lowercase s
 | `agent.handoff` | Work handed to another agent | yes | `execute_tool` |
 | `agent.review` | A verdict on another agent's work | yes | `invoke_agent` |
 | `agent.file_write` | An agent wrote a file | no | `execute_tool` |
-| `agent.trade_action` | A recorded action with a status | no | `execute_tool` |
+| `agent.action` | A recorded action with a status | no | `execute_tool` |
 | `agent.alert` | Something needs attention | no | `invoke_agent` |
 | `agent.heartbeat` | The sender is alive. Not stored as an event. | no | `invoke_agent` |
 
@@ -51,7 +54,7 @@ A tool call is any of these with `gen_ai.tool.name` set. `report_event` accepts 
 | `gen_ai.transfer.target.name` | server | On handoffs, the receiver's display name. |
 | `bn.label` | no | Short neutral label, 60 characters or fewer. See below. |
 | `bn.source` | no | `watcher`, `self-report`, `transcript`, or `relay`. |
-| `bn.tickers` | no | Up to 12 uppercase symbols. |
+| `bn.tags` | no | Up to 12 short slugs: a letter, then letters, digits, `_` or `-`. |
 | `bn.file` | no | Relative path, 120 characters or fewer, no `..`. |
 | `bn.test` | no | `true` keeps the event in the log but out of network totals. |
 
@@ -79,7 +82,7 @@ Default base: `http://127.0.0.1:4319`
 
 | Method | Path | Body |
 |---|---|---|
-| `POST` | `/api/v1/emit` | Flat object: `from`, `kind`, `label`, optional `to`, `status`, `tool`, `file`, `parent_id`, `event_id`, `test` |
+| `POST` | `/api/v1/emit` | Flat object: `from`, `kind`, `label`, optional `to`, `status`, `tool`, `tags`, `file`, `parent_id`, `event_id`, `test` |
 | `POST` | `/api/v1/network/events` | One event, or `{"events":[...]}` (1–100). Response is `207` with `accepted`, `duplicates`, `rejected`. |
 | `GET` | `/api/v1/network/events?since=&limit=` | Events with `seq` greater than `since`, oldest first. `limit` is 1–500, default 200. |
 | `GET` | `/api/v1/network` | Nodes, edges, retention, head sequence. |
@@ -87,7 +90,14 @@ Default base: `http://127.0.0.1:4319`
 | `POST` | `/v1/traces` | OTLP/HTTP JSON. Protobuf is not accepted. |
 | `POST` | `/mcp` | Stateless MCP Streamable HTTP. |
 
-There is no account and no token. The socket is bound to loopback.
+The socket is bound to loopback. Every request is also checked:
+
+- `Host` must be `127.0.0.1`, `localhost`, or `[::1]` with the configured port, or the response is `403`.
+- A present `Origin` must use one of those loopback names, or the response is `403`. This is the MCP Streamable HTTP (2026-07-28) Origin check. A missing `Origin` is allowed.
+- Write requests need `Content-Type: application/json` (`415` otherwise) and `Authorization: Bearer` with the token in `~/.swarmscope/token` (`401` otherwise). Writes are `POST /api/v1/emit`, `POST /api/v1/network/events`, `POST /v1/traces`, and a `tools/call` of `report_event` on `POST /mcp`.
+- Reads, including the viewer and `get_network` / `list_events` over HTTP, do not use the token. Stdio MCP does not use it either.
+
+The token file is created on first run and its mode is `0600`. Logs print the path, not the value.
 
 Body limit is 64 KiB. The same `event_id` is stored once. Events are kept 7 days by default
 (`SWARMSCOPE_RETENTION_DAYS`). Ordering is the server `seq`, which is arrival order.
@@ -97,7 +107,15 @@ Body limit is 64 KiB. The same `event_id` is stored once. Events are kept 7 days
 Tools: `report_event`, `get_network`, `list_events`.
 
 `report_event` arguments: `from`, `kind`, `label` required; `to`, `status`, `source`, `tool`,
-`operation`, `conversation`, `name`, `tickers`, `file`, `parent_id`, `event_id`, `test` optional.
+`operation`, `conversation`, `name`, `tags`, `file`, `parent_id`, `event_id`, `test` optional.
+
+## Migration
+
+Vocabulary 1.1 keeps `schema_version` at `"1"` so existing senders keep working.
+
+- Prefer `agent.action` and `bn.tags` (short slugs).
+- `agent.trade_action` is stored as `agent.action`. `bn.tickers` is stored as `bn.tags`.
+- A legacy symbol is lowercased, and a dot becomes a hyphen (`BRK.A` becomes `brk-a`).
 
 `list_events` arguments: `since` (default 0), `limit` (default 50, max 200), `include_test`,
 `kind`, `from`, `to`. Pass `since` back as `next_since` to page.

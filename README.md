@@ -28,11 +28,12 @@ npx -y github:josephcake/swarmscope emit \
   --from planner --to coder --kind handoff --label "handoff · draft"
 ```
 
-Or POST it:
+Or POST it. HTTP writes need the bearer token created at `~/.swarmscope/token` on first run:
 
 ```sh
 curl -sS -X POST http://127.0.0.1:4319/api/v1/emit \
   -H 'content-type: application/json' \
+  -H "authorization: Bearer $(cat ~/.swarmscope/token)" \
   -d '{"from":"planner","to":"coder","kind":"handoff","label":"handoff · draft"}'
 ```
 
@@ -109,11 +110,11 @@ Start `swarmscope ui` (or the default MCP command, which opens the same port) an
 
 | Tool | What it does |
 |---|---|
-| `report_event` | One agent reports a message, handoff, review, file write, alert, heartbeat, or tool call. |
+| `report_event` | One agent reports a message, handoff, review, file write, action, alert, heartbeat, or tool call. |
 | `get_network` | Agents, plus edges `{from, to, kind, count, first_ts, last_ts}`. |
 | `list_events` | The log, with `since` / `limit` paging and `kind`, `from`, `to` filters. |
 
-`report_event` arguments: `from`, `kind`, and `label` are required. `to` is required for `message`, `handoff`, and `review`. Optional: `status` (`ok` or `error`), `tool`, `file`, `parent_id`, `event_id`, `test`.
+`report_event` arguments: `from`, `kind`, and `label` are required. `to` is required for `message`, `handoff`, and `review`. Optional: `status` (`ok` or `error`), `tool`, `tags`, `file`, `parent_id`, `event_id`, `test`. Kinds: `message`, `handoff`, `review`, `file_write`, `action`, `alert`, `heartbeat`.
 
 Sending the same `event_id` again does nothing. Labels are short and neutral: 60 characters or fewer, no URLs, no emails, no secrets.
 
@@ -159,19 +160,56 @@ A handoff looks like this:
 }
 ```
 
-`POST /api/v1/network/events` accepts that object, or `{"events":[...]}` with up to 100. `POST /v1/traces` accepts OTLP/HTTP JSON.
+`POST /api/v1/network/events` accepts that object, or `{"events":[...]}` with up to 100. `POST /v1/traces` accepts OTLP/HTTP JSON. Both need the same bearer token as `/api/v1/emit`.
+
+## Security
+
+Binding to `127.0.0.1` is not enough. A page you visit can still reach a loopback port, including by DNS rebinding (the site's name resolves to `127.0.0.1`, so the browser treats it as that site).
+
+- `Host` must be `127.0.0.1`, `localhost`, or `[::1]`, with this process's port. Anything else is `403`.
+- A request that sends an `Origin` from anywhere other than those loopback names is `403`. The [MCP Streamable HTTP spec (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) requires this check. Requests with no `Origin` (curl, stdio clients) are allowed.
+- Writes (`POST /api/v1/emit`, `POST /api/v1/network/events`, `POST /v1/traces`, and `report_event` on `POST /mcp`) require `Content-Type: application/json`. `text/plain` is `415`, so a page cannot use a simple cross-origin POST.
+- Those writes also require `Authorization: Bearer` with the token in `~/.swarmscope/token`. The file is created on first run, mode `0600`. Logs and these docs show the path only. Stdio MCP does not use the token. `swarmscope emit` reads the file when it posts to a viewer that is already up.
+- The viewer is same-origin and only reads, so opening `http://127.0.0.1:4319` needs no token.
+
+```sh
+# refused: wrong host
+curl -sS -D - -o /dev/null http://127.0.0.1:4319/api/v1/health -H 'host: evil.example'
+
+# refused: text/plain write
+curl -sS -D - -o /dev/null -X POST http://127.0.0.1:4319/api/v1/emit \
+  -H 'content-type: text/plain' \
+  -H "authorization: Bearer $(cat ~/.swarmscope/token)" \
+  -d '{"from":"planner","to":"coder","kind":"message","label":"message · note"}'
+
+# accepted
+curl -sS -X POST http://127.0.0.1:4319/api/v1/emit \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $(cat ~/.swarmscope/token)" \
+  -d '{"from":"planner","to":"coder","kind":"handoff","label":"handoff · draft"}'
+```
 
 ## Privacy
 
 All of this stays on the machine it runs on.
 
 - SQLite at `~/.swarmscope/events.db` (or a JSON file if `node:sqlite` is unavailable)
+- Write token at `~/.swarmscope/token` (mode `0600`). It is not an account and it is not sent anywhere
 - Kept for 7 days (`SWARMSCOPE_RETENTION_DAYS`)
 - Bound to `127.0.0.1`
-- No accounts, no API keys, no analytics, and no outbound requests
+- No accounts, no cloud API keys, no analytics, and no outbound requests
 - The viewer ships its own fonts, so the page does not call a font host
 
 Do not put secrets, message bodies, or personal data in labels.
+
+## Migration
+
+Vocabulary revision 1.1. The wire `schema_version` is still `"1"`.
+
+- Send `agent.action` instead of `agent.trade_action`, and `kind: "action"` to `report_event` and `swarmscope emit`.
+- Send `bn.tags` (short slugs such as `draft` or `needs-review`) instead of `bn.tickers`. The flat field is `tags`.
+
+Older senders may still use `trade_action` and `tickers`. The server stores them as `agent.action` and `bn.tags`. An old symbol such as `BRK.A` is stored as `brk-a`.
 
 ## Commands
 
@@ -194,7 +232,7 @@ npm run build
 node dist/cli.js demo
 ```
 
-Tests use vitest and cover event validation, edge aggregation, both storage backends, the MCP tools, HTTP emit, the websocket, and OTLP ingest. `dist/` is committed so `npx github:josephcake/swarmscope` can run without a compile step. `npm install` rebuilds when the TypeScript toolchain is present.
+Tests use vitest and cover event validation, edge aggregation, both storage backends, the MCP tools, HTTP emit, the websocket, and OTLP ingest. `npm test` also runs `check:dist`, which fails when `dist/` does not match a fresh build. `dist/` is committed so `npx github:josephcake/swarmscope` can run without a compile step. `npm install` rebuilds when the TypeScript toolchain is present.
 
 ## License
 

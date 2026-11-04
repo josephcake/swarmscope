@@ -95,4 +95,27 @@ describe('MCP tools', () => {
     expect(network.json.edges).toEqual([]);
     await close();
   });
+
+  it('accepts the deprecated kind and ticker alias', async () => {
+    const { client, close } = await session();
+    const reported = payload(
+      await client.callTool({
+        name: 'report_event',
+        arguments: { from: 'runner', kind: 'trade_action', label: 'action · filed', tickers: ['AAPL', 'BRK.A'] },
+      }),
+    );
+    expect(reported.isError).toBe(false);
+    const page = payload(await client.callTool({ name: 'list_events', arguments: { kind: 'trade_action' } }));
+    const events = page.json.events as { kind: string; tags?: string[] }[];
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'action', tags: ['aapl', 'brk-a'] });
+    const listed = await client.listTools();
+    const report = listed.tools.find((tool) => tool.name === 'report_event');
+    expect(report?.description ?? '').not.toContain('trade_action');
+    expect(report?.description ?? '').not.toContain('ticker');
+    const schema = JSON.stringify(report?.inputSchema ?? {});
+    expect(schema).not.toContain('trade_action');
+    expect(schema).not.toContain('ticker');
+    await close();
+  });
 });

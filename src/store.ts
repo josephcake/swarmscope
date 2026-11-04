@@ -9,6 +9,8 @@ import {
   NetEventError,
   checkNetEvent,
   displayName,
+  canonicalKind,
+  canonicalizeEvent,
   kindOf,
   type NetEventV1,
   type NetStreamEvent,
@@ -631,10 +633,10 @@ export class Store {
         guard += 1;
         cursor = row.seq;
         if (opts.skipTest && row.test) continue;
-        if (opts.kind && row.kind !== opts.kind) continue;
+        if (opts.kind && canonicalKind(row.kind) !== canonicalKind(opts.kind)) continue;
         if (opts.from && row.from_id !== opts.from) continue;
         if (opts.to && row.to_id !== opts.to) continue;
-        const body = JSON.parse(row.body) as NetEventV1;
+        const body = canonicalizeEvent(JSON.parse(row.body) as NetEventV1);
         out.push({ ...body, seq: row.seq, received_unix_ms: row.received_ms });
         hit = true;
         if (out.length >= limit) break;
@@ -678,7 +680,7 @@ export class Store {
       schema_version: '1',
       demo: this.engine.metaGet('demo') === '1',
       nodes,
-      edges: aggregateEdges(this.engine.edgeInputs()),
+      edges: aggregateEdges(this.engine.edgeInputs().map((edge) => ({ ...edge, kind: canonicalKind(edge.kind) }))),
       head_seq: this.engine.head(),
       heartbeat: this.heartbeat(),
       retention: {

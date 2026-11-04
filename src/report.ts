@@ -11,6 +11,8 @@ export interface ReportArgs {
   operation?: unknown;
   conversation?: unknown;
   name?: unknown;
+  tags?: unknown;
+  /** Deprecated alias of tags. Accepted and stored as bn.tags. */
   tickers?: unknown;
   file?: unknown;
   parent_id?: unknown;
@@ -29,6 +31,7 @@ const KEYS = new Set([
   'operation',
   'conversation',
   'name',
+  'tags',
   'tickers',
   'file',
   'parent_id',
@@ -44,7 +47,7 @@ export function rawFromReport(args: ReportArgs, nowMs: number, newId: () => stri
   for (const k of Object.keys(args)) {
     if (!KEYS.has(k)) throw new NetEventError(`Unknown argument "${k}".`);
   }
-  const kind = String(args.kind ?? '');
+  const kind = args.kind === 'trade_action' ? 'action' : String(args.kind ?? '');
   if (!KIND_NAMES.includes(kind)) throw new NetEventError(`kind must be one of ${KIND_NAMES.join(', ')}.`);
   if (args.label === undefined || args.label === '') throw new NetEventError('label is required.');
   if (args.test !== undefined && typeof args.test !== 'boolean') throw new NetEventError('test must be true or false.');
@@ -58,6 +61,7 @@ export function rawFromReport(args: ReportArgs, nowMs: number, newId: () => stri
   if (args.tool !== undefined) attributes['gen_ai.tool.name'] = args.tool;
   if (args.operation !== undefined) attributes['gen_ai.operation.name'] = args.operation;
   if (args.conversation !== undefined) attributes['gen_ai.conversation.id'] = args.conversation;
+  if (args.tags !== undefined) attributes['bn.tags'] = args.tags;
   if (args.tickers !== undefined) attributes['bn.tickers'] = args.tickers;
   if (args.file !== undefined) attributes['bn.file'] = args.file;
   if (args.test === true) attributes['bn.test'] = true;

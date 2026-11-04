@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && vite build",
     "prepare": "node scripts/prepare.mjs",
-    "test": "vitest run",
+    "test": "vitest run && npm run check:dist",
+    "check:dist": "node scripts/check-dist.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.viewer.json --noEmit",
     "dev:ui": "vite"
   },
