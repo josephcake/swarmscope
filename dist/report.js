@@ -10,6 +10,7 @@ const KEYS = new Set([
     'operation',
     'conversation',
     'name',
+    'tags',
     'tickers',
     'file',
     'parent_id',
@@ -25,7 +26,7 @@ export function rawFromReport(args, nowMs, newId) {
         if (!KEYS.has(k))
             throw new NetEventError(`Unknown argument "${k}".`);
     }
-    const kind = String(args.kind ?? '');
+    const kind = args.kind === 'trade_action' ? 'action' : String(args.kind ?? '');
     if (!KIND_NAMES.includes(kind))
         throw new NetEventError(`kind must be one of ${KIND_NAMES.join(', ')}.`);
     if (args.label === undefined || args.label === '')
@@ -47,6 +48,8 @@ export function rawFromReport(args, nowMs, newId) {
         attributes['gen_ai.operation.name'] = args.operation;
     if (args.conversation !== undefined)
         attributes['gen_ai.conversation.id'] = args.conversation;
+    if (args.tags !== undefined)
+        attributes['bn.tags'] = args.tags;
     if (args.tickers !== undefined)
         attributes['bn.tickers'] = args.tickers;
     if (args.file !== undefined)

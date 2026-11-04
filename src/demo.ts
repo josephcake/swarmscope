@@ -111,6 +111,7 @@ export function buildDemo(now: number): BuiltDemo {
   push(9 * 60_000, 'agent.message', 'scribe', 'editor', 'message · summary');
   push(6 * 60_000, 'agent.message', 'indexer', 'librarian', 'message · index ready');
   push(4 * 60_000, 'agent.message', 'runner', 'coder', 'message · checks passed');
+  push(3 * 60_000, 'agent.action', 'runner', undefined, 'action · checkpoint', { 'bn.tags': ['draft', 'checks'] });
   push(110_000, 'agent.handoff', 'librarian', 'archivist', 'handoff · notes');
   push(90_000, 'agent.message', 'navigator', 'planner', 'message · status');
   push(70_000, 'agent.message', 'researcher', 'indexer', 'message · sources ready');

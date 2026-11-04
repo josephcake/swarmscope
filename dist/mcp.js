@@ -4,13 +4,38 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { KIND_NAMES, NET_SOURCES, NetEventError, checkNetEvent, kindOf, newEventId } from './events.js';
+import { KIND_NAMES, NET_LIMITS, NET_SOURCES, NetEventError, checkNetEvent, kindOf, newEventId } from './events.js';
 import { rawFromReport } from './report.js';
 import { allowWrite } from './rate.js';
 import { VERSION } from './version.js';
 export const LIST_DEFAULT = 50;
 export const LIST_MAX = 200;
 export const EDGES_MAX = 200;
+const KIND_ENUM = KIND_NAMES;
+const LEGACY_TICKER = /^[A-Z]{1,6}(\.[A-Z])?$/;
+/** Accept deprecated names without listing them on the tool schema. */
+function liftLegacy(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return value;
+    const obj = { ...value };
+    if (obj.kind === 'trade_action')
+        obj.kind = 'action';
+    if (obj.tickers !== undefined) {
+        if (!Array.isArray(obj.tickers)) {
+            obj.tags = obj.tickers;
+        }
+        else {
+            const current = Array.isArray(obj.tags) ? obj.tags : [];
+            obj.tags = [
+                ...current,
+                ...obj.tickers.map((item) => typeof item === 'string' && LEGACY_TICKER.test(item) ? item.toLowerCase().replaceAll('.', '-') : item),
+            ];
+        }
+        delete obj.tickers;
+    }
+    return obj;
+}
+const kindFilterSchema = z.preprocess((value) => (value === 'trade_action' ? 'action' : value), z.enum(KIND_ENUM).optional());
 const instructions = [
     'Swarmscope is a local map of your AI agents and the messages, handoffs, reviews, and tool calls between them.',
     'Call report_event when one agent talks to another. Call get_network for agents and edges. Call list_events to page the log.',
@@ -21,14 +46,14 @@ export function createMcpServer(store) {
     const server = new McpServer({ name: 'swarmscope', version: VERSION }, { instructions });
     server.registerTool('report_event', {
         title: 'Report an agent event',
-        description: 'Record one event from an agent: a message, handoff, review, file write, alert, heartbeat, or a tool call (set tool). ' +
+        description: 'Record one event from an agent: a message, handoff, review, file write, action, alert, heartbeat, or a tool call (set tool). ' +
             'from and to are lowercase slugs you choose (for example planner, researcher, coder). ' +
             'to is required for message, handoff, and review. label is a short neutral gist, 60 characters or fewer. ' +
             'Set test=true for traffic you do not want in network totals. The same event_id is stored once.',
-        inputSchema: {
+        inputSchema: z.preprocess(liftLegacy, z.object({
             from: z.string().describe('Sending agent id, a lowercase slug.'),
             to: z.string().optional().describe('Receiving agent id. Required for message, handoff, and review.'),
-            kind: z.enum(KIND_NAMES).describe('Event kind.'),
+            kind: z.enum(KIND_ENUM).describe('Event kind: message, handoff, review, file_write, action, alert, or heartbeat.'),
             label: z.string().describe('Short neutral gist. No URLs, emails, or secrets.'),
             status: z.enum(['ok', 'error']).optional(),
             source: z.enum(NET_SOURCES).optional(),
@@ -36,12 +61,12 @@ export function createMcpServer(store) {
             operation: z.string().optional().describe('Overrides gen_ai.operation.name.'),
             conversation: z.string().optional().describe('Thread id. Stored as gen_ai.conversation.id.'),
             name: z.string().optional().describe('Display name for the sending agent.'),
-            tickers: z.array(z.string()).max(12).optional(),
+            tags: z.array(z.string()).max(NET_LIMITS.tags).optional().describe('Short slugs, up to 12.'),
             file: z.string().optional().describe('Relative path this event wrote or read.'),
             parent_id: z.string().optional().describe('event_id of the event that caused this one.'),
             event_id: z.string().optional().describe('Stable id. Generated when omitted.'),
             test: z.boolean().optional().describe('Verification traffic. Hidden from network totals.'),
-        },
+        })),
         annotations: { title: 'Report event', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     }, async (args) => {
         try {
@@ -80,7 +105,7 @@ export function createMcpServer(store) {
             since: z.number().int().min(0).optional(),
             limit: z.number().int().min(1).max(LIST_MAX).optional(),
             include_test: z.boolean().optional(),
-            kind: z.enum(KIND_NAMES).optional(),
+            kind: kindFilterSchema,
             from: z.string().optional(),
             to: z.string().optional(),
         },
@@ -124,8 +149,8 @@ export function compactEvent(e) {
         out.tool = a['gen_ai.tool.name'];
     if (a['gen_ai.operation.name'])
         out.operation = a['gen_ai.operation.name'];
-    if (a['bn.tickers']?.length)
-        out.tickers = a['bn.tickers'];
+    if (a['bn.tags']?.length)
+        out.tags = a['bn.tags'];
     if (a['bn.file'])
         out.file = a['bn.file'];
     if (e.parent_id)

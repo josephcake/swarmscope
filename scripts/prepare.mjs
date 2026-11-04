@@ -6,6 +6,10 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
+// CI compares the committed dist/ with a fresh build. Rebuilding here would
+// hide a drift before check:dist runs.
+if (process.env.CI) process.exit(0);
+
 const haveTsc = existsSync(new URL('../node_modules/typescript/package.json', import.meta.url));
 const haveVite = existsSync(new URL('../node_modules/vite/package.json', import.meta.url));
 const haveDist = existsSync(new URL('../dist/cli.js', import.meta.url));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { batchOf, checkLabel, checkNetEvent, displayName, NetEventError, spanIdFor } from '../src/events.js';
+import { batchOf, canonicalizeEvent, checkLabel, checkNetEvent, displayName, NetEventError, spanIdFor } from '../src/events.js';
 
 const now = Date.parse('2026-06-15T18:00:00.000Z');
 
@@ -73,5 +73,29 @@ describe('event validation', () => {
 
   it('derives a display name from a slug', () => {
     expect(displayName('code-reviewer')).toBe('Code Reviewer');
+  });
+
+  it('normalizes trade_action and tickers onto action and tags', () => {
+    const ev = checkNetEvent(
+      raw(
+        { name: 'agent.trade_action', event_id: 'evt-action-01' },
+        { 'bn.target.id': undefined, 'bn.label': 'action · filed', 'bn.tickers': ['AAPL', 'BRK.A'] },
+      ),
+      now,
+    );
+    expect(ev.name).toBe('agent.action');
+    expect(ev.attributes['bn.tags']).toEqual(['aapl', 'brk-a']);
+    expect(ev.attributes).not.toHaveProperty('bn.tickers');
+    const tags = checkNetEvent(
+      raw({ name: 'agent.action', event_id: 'evt-action-02' }, { 'bn.target.id': undefined, 'bn.tags': ['draft', 'needs-review'] }),
+      now,
+    );
+    expect(tags.attributes['bn.tags']).toEqual(['draft', 'needs-review']);
+    const stored = canonicalizeEvent({
+      name: 'agent.trade_action',
+      attributes: { 'bn.tickers': ['MSFT'], 'bn.label': 'action · old' },
+    });
+    expect(stored.name).toBe('agent.action');
+    expect(stored.attributes['bn.tags']).toEqual(['msft']);
   });
 });
